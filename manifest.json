@@ -1,0 +1,15 @@
+{
+  "name": "Слух — помощник разговора",
+  "short_name": "Слух",
+  "description": "Усиление речи и защита слуха для комфортного общения",
+  "start_url": "./index.html",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#0a0e13",
+  "theme_color": "#0a0e13",
+  "lang": "ru",
+  "icons": [
+    { "src": "icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" }
+  ]
+}

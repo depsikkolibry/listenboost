@@ -1,0 +1,74 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+<meta name="theme-color" content="#0a0e13">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<title>Слух — помощник разговора</title>
+<link rel="manifest" href="manifest.json">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+<header>
+  <h1>Слух</h1>
+  <p class="sub">Помощник для комфортного разговора · v0.2</p>
+</header>
+
+<main>
+  <section class="card hero">
+    <button id="startBtn" class="big green">▶ Начать слушать</button>
+    <button id="stopBtn" class="big red" disabled>■ Стоп</button>
+    <p id="status" class="status">Подключите наушник, поставьте телефон в центр стола и нажмите «Начать».</p>
+    <div class="meter"><div id="meterFill"></div></div>
+  </section>
+
+  <section class="card">
+    <h2>Режим</h2>
+    <div class="presets">
+      <button data-preset="talk" class="preset active">Разговор</button>
+      <button data-preset="tv" class="preset">Телевизор</button>
+      <button data-preset="outside" class="preset">Улица</button>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2>Настройки</h2>
+
+    <label>Громкость <span id="gainVal" class="val">1.5×</span></label>
+    <input type="range" id="gain" min="0.5" max="4" step="0.1">
+
+    <label>Усиление тихой речи <span id="maxAgcVal" class="val">4×</span></label>
+    <input type="range" id="maxAgc" min="1" max="8" step="0.5">
+
+    <label>Подавление шума <span id="nrVal" class="val">0.50</span></label>
+    <input type="range" id="nr" min="0" max="1" step="0.05">
+
+    <label>Защита от резких звуков <span id="transientVal" class="val">0.60</span></label>
+    <input type="range" id="transient" min="0" max="1" step="0.05">
+
+    <label>Отсечение фонового гула <span id="gateVal" class="val">−50 dB</span></label>
+    <input type="range" id="gate" min="-70" max="-20" step="1">
+
+    <label>Разборчивость речи (2–4 кГц) <span id="presenceVal" class="val">+4 dB</span></label>
+    <input type="range" id="presence" min="0" max="12" step="0.5">
+
+    <label>Убрать низкий гул <span id="hpVal" class="val">100 Гц</span></label>
+    <input type="range" id="hp" min="40" max="300" step="10">
+  </section>
+
+  <section class="card">
+    <h2>Совет</h2>
+    <p class="tip">Используйте <b>один вкладыш</b> (не колонку) — так не будет свиста. Начните с громкости 1.5×. Если слышно эхо или свист — уменьшите громкость или «усиление тихой речи».</p>
+  </section>
+</main>
+
+<footer>
+  <p>v0.2 · для слабослышащих · не является медицинским изделием</p>
+</footer>
+
+<script src="app.js"></script>
+</body>
+</html>
