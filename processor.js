@@ -1,4 +1,4 @@
-// ListenBoost v0.3 — AudioWorklet DSP
+// ListenBoost v0.3.1 — AudioWorklet DSP
 // STFT NR + De-esser + VAD + Transient limiter + Gate + AGC + Limiter
 
 class ListenProcessor extends AudioWorkletProcessor {
@@ -151,8 +151,8 @@ class ListenProcessor extends AudioWorkletProcessor {
       const dd = 0.98;
 
       for (let k = 0; k < nBins; k++) {
-        const xr = re[k], xi = im[k];
-        const power = xr * xr + xi * xi;
+        const xr = re[k], imVal = im[k]; // ИСПРАВЛЕНО: imVal вместо xi
+        const power = xr * xr + imVal * imVal;
 
         this.smoothP[k] = 0.7 * this.smoothP[k] + 0.3 * power;
 
@@ -169,9 +169,9 @@ class ListenProcessor extends AudioWorkletProcessor {
 
         // Decision-directed a priori SNR (Ephraim-Malah)
         const gamma = power / (this.noiseP[k] + 1e-10);
-        const xi = dd * (this.prevClean[k] / (this.noiseP[k] + 1e-10))
-                 + (1 - dd) * Math.max(gamma - 1, 0);
-        let g = xi / (1 + xi);
+        const xiSNR = dd * (this.prevClean[k] / (this.noiseP[k] + 1e-10))
+                 + (1 - dd) * Math.max(gamma - 1, 0); // ИСПРАВЛЕНО: xiSNR вместо xi
+        let g = xiSNR / (1 + xiSNR);
         if (g < floor) g = floor;
         if (g > 1) g = 1;
 
@@ -180,7 +180,7 @@ class ListenProcessor extends AudioWorkletProcessor {
         this.prevClean[k] = power * this.smoothGain[k] * this.smoothGain[k];
 
         re[k] = xr * this.smoothGain[k];
-        im[k] = xi * this.smoothGain[k];
+        im[k] = imVal * this.smoothGain[k]; // ИСПРАВЛЕНО: imVal вместо xi
       }
 
       // De-esser в STFT-домене
