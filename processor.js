@@ -1,39 +1,29 @@
-// ListenBoost v0.2 — AudioWorklet DSP
-// Реальное спектральное шумоподавление: STFT + minimum statistics + Wiener
-//
-// Конвейер:
-//   1. Буферизация: N=512, hop=256, окно sqrt(Hann) — COLA
-//   2. FFT → спектр мощности
-//   3. Оценка шума по бину: minimum tracking + bias correction
-//   4. Wiener-усиление с over-subtraction, сглаживание, spectral floor
-//   5. IFFT → synthesis window → overlap-add
-//   6. Per-sample: transient limiter, noise gate, AGC, master gain, лимитер
+// ListenBoost v0.3 — AudioWorklet DSP
+// STFT NR + De-esser + VAD + Transient limiter + Gate + AGC + Limiter
 
 class ListenProcessor extends AudioWorkletProcessor {
   constructor() {
     super();
-
     this.N = 512;
     this.hop = 256;
     this.nBins = this.N / 2 + 1;
     const sr = sampleRate;
-    const fps = sr / this.hop; // ~187.5 кадров/сек
+    const fps = sr / this.hop;
 
-    // sqrt(Hann) — COLA при H=N/2: w_a * w_s = Hann, sum = 1
+    // sqrt(Hann) — COLA при H=N/2
     this.window = new Float32Array(this.N);
     for (let i = 0; i < this.N; i++) {
       const h = 0.5 * (1 - Math.cos((2 * Math.PI * i) / this.N));
       this.window[i] = Math.sqrt(Math.max(h, 1e-8));
     }
 
-    // Буферы анализа/синтеза
     this.inBuf = new Float32Array(this.N);
     this.hopBuf = new Float32Array(this.hop);
     this.outBuf = new Float32Array(this.N);
     this.olaTemp = new Float32Array(this.N);
     this.hopPos = 0;
 
-    // FFT scratch
+    // FFT
     this.re = new Float32Array(this.N);
     this.im = new Float32Array(this.N);
     this.cos = new Float32Array(this.N);
@@ -43,7 +33,6 @@ class ListenProcessor extends AudioWorkletProcessor {
       this.cos[i] = Math.cos(ang);
       this.sin[i] = Math.sin(ang);
     }
-    // Таблица бит-реверса
     this.bitrev = new Uint16Array(this.N);
     const logN = Math.log2(this.N);
     for (let i = 0; i < this.N; i++) {
@@ -52,41 +41,53 @@ class ListenProcessor extends AudioWorkletProcessor {
       this.bitrev[i] = r;
     }
 
-    // Состояние шумоподавления (per-bin)
+    // NR state
     this.smoothP = new Float32Array(this.nBins);
     this.minP = new Float32Array(this.nBins).fill(1e10);
     this.minCount = new Uint16Array(this.nBins);
     this.noiseP = new Float32Array(this.nBins).fill(1e-10);
     this.smoothGain = new Float32Array(this.nBins).fill(1);
-    this.minResetPeriod = 400; // ~2.1 с при hop=256, 48кГц
+    this.prevClean = new Float32Array(this.nBins); // decision-directed
+    this.prevGain = new Float32Array(this.nBins).fill(1);
+    this.minResetPeriod = 400;
 
-    // Параметры, управляемые из UI
-    this.gainMaster = 1.5;
-    this.maxAgc = 4;
-    this.gateDb = -50;
-    this.transient = 0.6;
-    this.nrStrength = 0.5;   // 0..1; 0 = bypass
-    this.nrEnabled = true;
+    // De-esser
+    this.sibEnv = 0;
 
-    // Огибающие (per-sample)
+    // VAD
+    this.frameCount = 0;
+    this.vadState = 0;
+    this.vadHold = 0;
+    this.vadPending = 0;
+
+    // Per-sample envelopes
     this.fastEnv = 0;
     this.slowEnv = 1e-4;
     this.transGain = 1;
     this.gateEnv = 1;
 
-    // AGC (per-hop)
+    // AGC
     this.agcEnv = 1e-3;
     this.agcGain = 1;
 
-    // Коэффициенты сглаживания
+    // Smoothing coeffs
     this.aFastA = Math.exp(-1 / (0.002 * sr));
     this.aFastR = Math.exp(-1 / (0.080 * sr));
     this.aSlowA = Math.exp(-1 / (0.200 * sr));
     this.aSlowR = Math.exp(-1 / (0.400 * sr));
     this.aAgcEnv  = Math.exp(-1 / (0.6 * fps));
     this.aAgcGain = Math.exp(-1 / (0.1 * fps));
-    this.aGate = Math.exp(-1 / (0.1 * sr));
-    this.aTrans = Math.exp(-1 / (0.02 * sr));
+    this.aGate    = Math.exp(-1 / (0.1 * sr));
+    this.aTrans   = Math.exp(-1 / (0.02 * sr));
+
+    // Params
+    this.gainMaster = 1.5;
+    this.maxAgc = 4;
+    this.gateDb = -50;
+    this.transient = 0.6;
+    this.nrStrength = 0.5;
+    this.nrEnabled = true;
+    this.deEssEnabled = true;
 
     this.port.onmessage = (e) => {
       const d = e.data;
@@ -97,14 +98,12 @@ class ListenProcessor extends AudioWorkletProcessor {
       if (d.transient !== undefined) this.transient = d.transient;
       if (d.nr !== undefined) this.nrStrength = d.nr;
       if (d.nrEnabled !== undefined) this.nrEnabled = d.nrEnabled;
+      if (d.deEss !== undefined) this.deEssEnabled = d.deEss;
     };
   }
 
-  // ---------- FFT ----------
   fft(re, im) {
-    const N = this.N;
-    const bitrev = this.bitrev;
-
+    const N = this.N, bitrev = this.bitrev;
     for (let i = 0; i < N; i++) {
       const j = bitrev[i];
       if (i < j) {
@@ -112,11 +111,9 @@ class ListenProcessor extends AudioWorkletProcessor {
         t = im[i]; im[i] = im[j]; im[j] = t;
       }
     }
-
     const cos = this.cos, sin = this.sin;
     for (let len = 2; len <= N; len <<= 1) {
-      const half = len >> 1;
-      const step = N / len;
+      const half = len >> 1, step = N / len;
       for (let i = 0; i < N; i += len) {
         for (let k = 0; k < half; k++) {
           const tw = k * step;
@@ -124,10 +121,8 @@ class ListenProcessor extends AudioWorkletProcessor {
           const a = i + k, b = a + half;
           const tRe = wRe * re[b] - wIm * im[b];
           const tIm = wRe * im[b] + wIm * re[b];
-          re[b] = re[a] - tRe;
-          im[b] = im[a] - tIm;
-          re[a] += tRe;
-          im[a] += tIm;
+          re[b] = re[a] - tRe; im[b] = im[a] - tIm;
+          re[a] += tRe; im[a] += tIm;
         }
       }
     }
@@ -137,103 +132,117 @@ class ListenProcessor extends AudioWorkletProcessor {
     const N = this.N;
     for (let i = 0; i < N; i++) im[i] = -im[i];
     this.fft(re, im);
-    for (let i = 0; i < N; i++) {
-      re[i] /= N;
-      im[i] = -im[i] / N;
-    }
+    for (let i = 0; i < N; i++) { re[i] /= N; im[i] = -im[i] / N; }
   }
 
-  // ---------- Обработка кадра ----------
   processFrame() {
-    const N = this.N;
+    const N = this.N, nBins = this.nBins;
     const re = this.re, im = this.im, win = this.window;
+    const sr = sampleRate;
 
-    for (let i = 0; i < N; i++) {
-      re[i] = this.inBuf[i] * win[i];
-      im[i] = 0;
-    }
+    for (let i = 0; i < N; i++) { re[i] = this.inBuf[i] * win[i]; im[i] = 0; }
     this.fft(re, im);
 
-    const nBins = this.nBins;
     const nrActive = this.nrEnabled && this.nrStrength > 0;
 
     if (nrActive) {
-      const alpha = 1 + this.nrStrength * 3;         // over-subtraction 1..4
+      const alpha = 1 + this.nrStrength * 3;
       const floor = Math.max(0.02, 0.1 - this.nrStrength * 0.08);
+      const dd = 0.98;
 
       for (let k = 0; k < nBins; k++) {
         const xr = re[k], xi = im[k];
         const power = xr * xr + xi * xi;
 
-        // Сглаживание мощности
         this.smoothP[k] = 0.7 * this.smoothP[k] + 0.3 * power;
 
-        // Minimum tracking
         if (this.smoothP[k] < this.minP[k]) {
           this.minP[k] = this.smoothP[k];
           this.minCount[k] = 0;
-        } else {
-          this.minCount[k]++;
-          if (this.minCount[k] > this.minResetPeriod) {
-            this.minP[k] = this.smoothP[k];
-            this.minCount[k] = 0;
-          }
+        } else if (++this.minCount[k] > this.minResetPeriod) {
+          this.minP[k] = this.smoothP[k];
+          this.minCount[k] = 0;
         }
 
-        // Оценка шума (bias correction ~1.5 для chi-square)
         const noiseEst = Math.max(this.minP[k] * 1.5, 1e-10);
         this.noiseP[k] = 0.9 * this.noiseP[k] + 0.1 * noiseEst;
 
-        // Wiener с over-subtraction
-        const snrPost = Math.max(0, power - alpha * this.noiseP[k])
-                        / (this.noiseP[k] + 1e-10);
-        let g = snrPost / (1 + snrPost);
+        // Decision-directed a priori SNR (Ephraim-Malah)
+        const gamma = power / (this.noiseP[k] + 1e-10);
+        const xi = dd * (this.prevClean[k] / (this.noiseP[k] + 1e-10))
+                 + (1 - dd) * Math.max(gamma - 1, 0);
+        let g = xi / (1 + xi);
         if (g < floor) g = floor;
+        if (g > 1) g = 1;
 
-        // Межкадровое сглаживание усиления
-        this.smoothGain[k] = 0.6 * this.smoothGain[k] + 0.4 * g;
+        this.smoothGain[k] = 0.7 * this.smoothGain[k] + 0.3 * g;
+        this.prevGain[k] = this.smoothGain[k];
+        this.prevClean[k] = power * this.smoothGain[k] * this.smoothGain[k];
 
         re[k] = xr * this.smoothGain[k];
         im[k] = xi * this.smoothGain[k];
       }
+
+      // De-esser в STFT-домене
+      if (this.deEssEnabled) {
+        const sibStart = Math.max(2, Math.floor(4500 * N / sr));
+        let lowP = 0, highP = 0;
+        for (let k = 2; k < sibStart; k++) lowP += this.smoothP[k];
+        for (let k = sibStart; k < nBins; k++) highP += this.smoothP[k];
+        const ratio = highP / (lowP + highP + 1e-10);
+        let red = 0;
+        if (ratio > 0.25) red = Math.min(0.55, (ratio - 0.25) * 2.5);
+        this.sibEnv = 0.7 * this.sibEnv + 0.3 * red;
+        if (this.sibEnv > 0.02) {
+          for (let k = sibStart; k < nBins; k++) {
+            re[k] *= (1 - this.sibEnv); im[k] *= (1 - this.sibEnv);
+          }
+        }
+      }
     }
 
-    // Восстановление эрмитова спектра
-    for (let k = 1; k < N / 2; k++) {
-      re[N - k] = re[k];
-      im[N - k] = -im[k];
-    }
-    im[0] = 0;
-    im[N / 2] = 0;
+    // Восстановление эрмитова
+    for (let k = 1; k < N / 2; k++) { re[N - k] = re[k]; im[N - k] = -im[k]; }
+    im[0] = 0; im[N / 2] = 0;
 
     this.ifft(re, im);
 
-    // Синтез-окно (sqrt Hann) → olaTemp
-    for (let i = 0; i < N; i++) {
-      this.olaTemp[i] = re[i] * win[i];
-    }
+    for (let i = 0; i < N; i++) this.olaTemp[i] = re[i] * win[i];
 
-    // AGC — раз в кадр по RMS olaTemp (после шумоподавления)
+    // AGC
     let sum = 0;
     for (let i = 0; i < N; i++) sum += this.olaTemp[i] * this.olaTemp[i];
     const rms = Math.sqrt(sum / N);
     this.agcEnv = this.aAgcEnv * this.agcEnv + (1 - this.aAgcEnv) * Math.max(rms, 1e-4);
-    let agcTarget = 0.12 / this.agcEnv;
-    if (agcTarget < 0.6) agcTarget = 0.6;
-    if (agcTarget > this.maxAgc) agcTarget = this.maxAgc;
-    this.agcGain = this.aAgcGain * this.agcGain + (1 - this.aAgcGain) * agcTarget;
+    let target = 0.12 / this.agcEnv;
+    target = Math.max(0.6, Math.min(this.maxAgc, target));
+    this.agcGain = this.aAgcGain * this.agcGain + (1 - this.aAgcGain) * target;
+
+    // VAD из шумовой полки и сигнала в полосе 200–4000 Гц
+    const lo = Math.max(2, Math.floor(200 * N / sr));
+    const hi = Math.min(nBins, Math.floor(4000 * N / sr));
+    let sig = 0, noi = 0;
+    for (let k = lo; k < hi; k++) { sig += this.smoothP[k]; noi += this.noiseP[k]; }
+    const snr = sig / (noi + 1e-10);
+    const now = snr > 3.0 ? 1 : 0;
+
+    if (now !== this.vadPending) { this.vadPending = now; this.vadHold = 0; }
+    if (++this.vadHold > 12 && this.vadPending !== this.vadState) {
+      this.vadState = this.vadPending;
+      this.port.postMessage({ type: 'vad', active: this.vadState });
+    }
+
+    if (++this.frameCount >= 8) {
+      this.frameCount = 0;
+      this.port.postMessage({ type: 'level', snr: Math.min(snr, 30) });
+    }
   }
 
-  // ---------- Per-sample ----------
   process(inputs, outputs) {
-    const inp = inputs[0];
-    const out = outputs[0][0];
+    const inp = inputs[0], out = outputs[0][0];
     if (!inp || !inp.length) { out.fill(0); return true; }
 
-    const n = out.length;
-    const N = this.N;
-    const hop = this.hop;
-    const ch = inp.length;
+    const n = out.length, N = this.N, hop = this.hop, ch = inp.length;
     const gateLin = Math.pow(10, this.gateDb / 20);
 
     for (let i = 0; i < n; i++) {
@@ -247,18 +256,14 @@ class ListenProcessor extends AudioWorkletProcessor {
 
       if (this.hopPos >= hop) {
         this.hopPos = 0;
-        // Сдвиг анализа
         this.inBuf.copyWithin(0, hop);
         this.inBuf.set(this.hopBuf, N - hop);
-        // Кадр
         this.processFrame();
-        // OLA: сдвиг + накопление
         this.outBuf.copyWithin(0, hop);
         this.outBuf.fill(0, N - hop);
         for (let j = 0; j < N; j++) this.outBuf[j] += this.olaTemp[j];
       }
 
-      // Огибающие
       const a = Math.abs(y);
       this.fastEnv = a > this.fastEnv
         ? this.aFastA * this.fastEnv + (1 - this.aFastA) * a
@@ -267,28 +272,19 @@ class ListenProcessor extends AudioWorkletProcessor {
         ? this.aSlowA * this.slowEnv + (1 - this.aSlowA) * a
         : this.aSlowR * this.slowEnv + (1 - this.aSlowR) * a;
 
-      // Защита от резких звуков
       const ratio = this.fastEnv / Math.max(this.slowEnv, 1e-5);
-      let transTarget = 1;
-      if (ratio > 1.6 && this.transient > 0) {
-        transTarget = Math.max(0.2, 1 / Math.pow(ratio, this.transient));
-      }
-      this.transGain = this.aTrans * this.transGain + (1 - this.aTrans) * transTarget;
+      let tTarget = 1;
+      if (ratio > 1.6 && this.transient > 0)
+        tTarget = Math.max(0.2, 1 / Math.pow(ratio, this.transient));
+      this.transGain = this.aTrans * this.transGain + (1 - this.aTrans) * tTarget;
 
-      // Шумовой гейт
-      const gateTarget = a < gateLin ? Math.max(0.05, a / gateLin) : 1;
-      this.gateEnv = this.aGate * this.gateEnv + (1 - this.aGate) * gateTarget;
+      const gTarget = a < gateLin ? Math.max(0.05, a / gateLin) : 1;
+      this.gateEnv = this.aGate * this.gateEnv + (1 - this.aGate) * gTarget;
 
-      // Сборка
       y = y * this.transGain * this.gateEnv * this.agcGain * this.gainMaster;
-
-      // Лимитер
-      if (y > 0.95) y = 0.95;
-      else if (y < -0.95) y = -0.95;
-
+      if (y > 0.95) y = 0.95; else if (y < -0.95) y = -0.95;
       out[i] = y;
     }
-
     return true;
   }
 }
