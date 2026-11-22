@@ -1,4 +1,4 @@
-const CACHE = 'sluh-v3';
+const CACHE = 'sluh-v3-1'; // ОБНОВЛЕНО: новая версия для сброса старого кэша
 const ASSETS = [
   './', './index.html', './styles.css', './app.js',
   './processor.js', './manifest.json', './icon.svg',
