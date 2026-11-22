@@ -1,5 +1,4 @@
-// ListenBoost v0.3.1 — AudioWorklet DSP
-// STFT NR + De-esser + VAD + Transient limiter + Gate + AGC + Limiter
+// ListenBoost v0.4 — AudioWorklet DSP + Vosk 16kHz Streamer
 
 class ListenProcessor extends AudioWorkletProcessor {
   constructor() {
@@ -10,7 +9,6 @@ class ListenProcessor extends AudioWorkletProcessor {
     const sr = sampleRate;
     const fps = sr / this.hop;
 
-    // sqrt(Hann) — COLA при H=N/2
     this.window = new Float32Array(this.N);
     for (let i = 0; i < this.N; i++) {
       const h = 0.5 * (1 - Math.cos((2 * Math.PI * i) / this.N));
@@ -23,7 +21,6 @@ class ListenProcessor extends AudioWorkletProcessor {
     this.olaTemp = new Float32Array(this.N);
     this.hopPos = 0;
 
-    // FFT
     this.re = new Float32Array(this.N);
     this.im = new Float32Array(this.N);
     this.cos = new Float32Array(this.N);
@@ -41,36 +38,28 @@ class ListenProcessor extends AudioWorkletProcessor {
       this.bitrev[i] = r;
     }
 
-    // NR state
     this.smoothP = new Float32Array(this.nBins);
     this.minP = new Float32Array(this.nBins).fill(1e10);
     this.minCount = new Uint16Array(this.nBins);
     this.noiseP = new Float32Array(this.nBins).fill(1e-10);
     this.smoothGain = new Float32Array(this.nBins).fill(1);
-    this.prevClean = new Float32Array(this.nBins); // decision-directed
+    this.prevClean = new Float32Array(this.nBins);
     this.prevGain = new Float32Array(this.nBins).fill(1);
     this.minResetPeriod = 400;
-
-    // De-esser
     this.sibEnv = 0;
 
-    // VAD
     this.frameCount = 0;
     this.vadState = 0;
     this.vadHold = 0;
     this.vadPending = 0;
 
-    // Per-sample envelopes
     this.fastEnv = 0;
     this.slowEnv = 1e-4;
     this.transGain = 1;
     this.gateEnv = 1;
-
-    // AGC
     this.agcEnv = 1e-3;
     this.agcGain = 1;
 
-    // Smoothing coeffs
     this.aFastA = Math.exp(-1 / (0.002 * sr));
     this.aFastR = Math.exp(-1 / (0.080 * sr));
     this.aSlowA = Math.exp(-1 / (0.200 * sr));
@@ -80,7 +69,6 @@ class ListenProcessor extends AudioWorkletProcessor {
     this.aGate    = Math.exp(-1 / (0.1 * sr));
     this.aTrans   = Math.exp(-1 / (0.02 * sr));
 
-    // Params
     this.gainMaster = 1.5;
     this.maxAgc = 4;
     this.gateDb = -50;
@@ -88,6 +76,12 @@ class ListenProcessor extends AudioWorkletProcessor {
     this.nrStrength = 0.5;
     this.nrEnabled = true;
     this.deEssEnabled = true;
+
+    // --- Vosk Downsampler ---
+    this.voskRatio = sr / 16000; // Обычно 3 (для 48кГц) или 2.75 (для 44.1кГц)
+    this.voskStep = 0;
+    this.voskBuf = new Int16Array(4096); // ~250мс аудио для Vosk
+    this.voskPos = 0;
 
     this.port.onmessage = (e) => {
       const d = e.data;
@@ -151,7 +145,7 @@ class ListenProcessor extends AudioWorkletProcessor {
       const dd = 0.98;
 
       for (let k = 0; k < nBins; k++) {
-        const xr = re[k], imVal = im[k]; // ИСПРАВЛЕНО: imVal вместо xi
+        const xr = re[k], imVal = im[k];
         const power = xr * xr + imVal * imVal;
 
         this.smoothP[k] = 0.7 * this.smoothP[k] + 0.3 * power;
@@ -166,11 +160,9 @@ class ListenProcessor extends AudioWorkletProcessor {
 
         const noiseEst = Math.max(this.minP[k] * 1.5, 1e-10);
         this.noiseP[k] = 0.9 * this.noiseP[k] + 0.1 * noiseEst;
-
-        // Decision-directed a priori SNR (Ephraim-Malah)
         const gamma = power / (this.noiseP[k] + 1e-10);
         const xiSNR = dd * (this.prevClean[k] / (this.noiseP[k] + 1e-10))
-                 + (1 - dd) * Math.max(gamma - 1, 0); // ИСПРАВЛЕНО: xiSNR вместо xi
+                 + (1 - dd) * Math.max(gamma - 1, 0);
         let g = xiSNR / (1 + xiSNR);
         if (g < floor) g = floor;
         if (g > 1) g = 1;
@@ -180,10 +172,9 @@ class ListenProcessor extends AudioWorkletProcessor {
         this.prevClean[k] = power * this.smoothGain[k] * this.smoothGain[k];
 
         re[k] = xr * this.smoothGain[k];
-        im[k] = imVal * this.smoothGain[k]; // ИСПРАВЛЕНО: imVal вместо xi
+        im[k] = imVal * this.smoothGain[k];
       }
 
-      // De-esser в STFT-домене
       if (this.deEssEnabled) {
         const sibStart = Math.max(2, Math.floor(4500 * N / sr));
         let lowP = 0, highP = 0;
@@ -201,15 +192,12 @@ class ListenProcessor extends AudioWorkletProcessor {
       }
     }
 
-    // Восстановление эрмитова
     for (let k = 1; k < N / 2; k++) { re[N - k] = re[k]; im[N - k] = -im[k]; }
     im[0] = 0; im[N / 2] = 0;
-
     this.ifft(re, im);
 
     for (let i = 0; i < N; i++) this.olaTemp[i] = re[i] * win[i];
 
-    // AGC
     let sum = 0;
     for (let i = 0; i < N; i++) sum += this.olaTemp[i] * this.olaTemp[i];
     const rms = Math.sqrt(sum / N);
@@ -218,7 +206,6 @@ class ListenProcessor extends AudioWorkletProcessor {
     target = Math.max(0.6, Math.min(this.maxAgc, target));
     this.agcGain = this.aAgcGain * this.agcGain + (1 - this.aAgcGain) * target;
 
-    // VAD из шумовой полки и сигнала в полосе 200–4000 Гц
     const lo = Math.max(2, Math.floor(200 * N / sr));
     const hi = Math.min(nBins, Math.floor(4000 * N / sr));
     let sig = 0, noi = 0;
@@ -230,11 +217,6 @@ class ListenProcessor extends AudioWorkletProcessor {
     if (++this.vadHold > 12 && this.vadPending !== this.vadState) {
       this.vadState = this.vadPending;
       this.port.postMessage({ type: 'vad', active: this.vadState });
-    }
-
-    if (++this.frameCount >= 8) {
-      this.frameCount = 0;
-      this.port.postMessage({ type: 'level', snr: Math.min(snr, 30) });
     }
   }
 
@@ -265,12 +247,8 @@ class ListenProcessor extends AudioWorkletProcessor {
       }
 
       const a = Math.abs(y);
-      this.fastEnv = a > this.fastEnv
-        ? this.aFastA * this.fastEnv + (1 - this.aFastA) * a
-        : this.aFastR * this.fastEnv + (1 - this.aFastR) * a;
-      this.slowEnv = a > this.slowEnv
-        ? this.aSlowA * this.slowEnv + (1 - this.aSlowA) * a
-        : this.aSlowR * this.slowEnv + (1 - this.aSlowR) * a;
+      this.fastEnv = a > this.fastEnv ? this.aFastA * this.fastEnv + (1 - this.aFastA) * a : this.aFastR * this.fastEnv + (1 - this.aFastR) * a;
+      this.slowEnv = a > this.slowEnv ? this.aSlowA * this.slowEnv + (1 - this.aSlowA) * a : this.aSlowR * this.slowEnv + (1 - this.aSlowR) * a;
 
       const ratio = this.fastEnv / Math.max(this.slowEnv, 1e-5);
       let tTarget = 1;
@@ -284,6 +262,21 @@ class ListenProcessor extends AudioWorkletProcessor {
       y = y * this.transGain * this.gateEnv * this.agcGain * this.gainMaster;
       if (y > 0.95) y = 0.95; else if (y < -0.95) y = -0.95;
       out[i] = y;
+
+      // --- Vosk Data Stream (16kHz) ---
+      this.voskStep += 16000 / sampleRate;
+      if (this.voskStep >= 1) {
+        this.voskStep -= 1;
+        // Ограничиваем амплитуду и переводим в Int16
+        const val = Math.max(-1, Math.min(1, y));
+        this.voskBuf[this.voskPos++] = val * 32767;
+        if (this.voskPos >= this.voskBuf.length) {
+          // Отправляем буфер в главный поток
+          this.port.postMessage({ type: 'vosk_audio', buffer: this.voskBuf }, [this.voskBuf.buffer]);
+          this.voskBuf = new Int16Array(4096);
+          this.voskPos = 0;
+        }
+      }
     }
     return true;
   }
