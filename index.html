@@ -4,24 +4,24 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
 <meta name="theme-color" content="#0a0e13">
-<meta name="apple-mobile-web-app-capable" content="yes">
 <title>Слух — помощник разговора</title>
 <link rel="manifest" href="manifest.json">
 <link rel="stylesheet" href="styles.css">
+<!-- Подключаем библиотеку Vosk -->
+<script src="https://cdn.jsdelivr.net/npm/vosk-browser@0.0.8/dist/vosk.js" crossorigin="anonymous"></script>
 </head>
 <body>
 
 <header>
   <h1>Слух</h1>
-  <p class="sub">Помощник разговора · v0.3</p>
+  <p class="sub">Помощник разговора · v0.4 (Офлайн ИИ)</p>
 </header>
 
 <main>
-
   <section class="card hero">
-    <button id="startBtn" class="big green">▶ Начать слушать</button>
+    <button id="startBtn" class="big green" disabled>⏳ Загрузка ИИ...</button>
     <button id="stopBtn" class="big red" disabled>■ Стоп</button>
-    <p id="status" class="status">Подключите наушник, поставьте телефон в центр стола.</p>
+    <p id="status" class="status">Инициализация офлайн-распознавания речи...</p>
     <div class="meter"><div id="meterFill"></div></div>
     <div class="vad-indicator">
       <span id="vadDot" class="dot"></span>
@@ -37,27 +37,20 @@
     </div>
   </section>
 
-  <!-- СУБТИТРЫ -->
   <section class="card subtitles-card">
-    <h2>Субтитры</h2>
+    <h2>Субтитры (Vosk Offline)</h2>
     <div id="subtitles" class="subtitles" role="log" aria-live="polite">
       <div class="subtitle-interim" id="subtitleInterim"></div>
       <div class="subtitle-final" id="subtitleFinal"></div>
     </div>
-    <label class="checkbox-row">
-      <input type="checkbox" id="asrToggle" checked>
-      <span>Показывать речь текстом</span>
-    </label>
   </section>
 
-  <!-- ВИЗУАЛИЗАЦИЯ -->
   <section class="card">
     <h2>Звук</h2>
     <canvas id="waveform" class="viz"></canvas>
     <canvas id="spectrum" class="viz"></canvas>
   </section>
 
-  <!-- НАСТРОЙКИ -->
   <details class="card" id="settingsCard">
     <summary>Настройки</summary>
 
@@ -103,11 +96,10 @@
       Если свистит — уменьшите громкость.
     </p>
   </section>
-
 </main>
 
 <footer>
-  <p>v0.3 · для слабослышащих · не медицинское изделие</p>
+  <p>v0.4 · для слабослышащих · не медицинское изделие</p>
 </footer>
 
 <script src="app.js"></script>
