@@ -1,8 +1,7 @@
-const CACHE = 'sluh-v4-vosk';
+const CACHE = 'sluh-v4-1';
 const ASSETS = [
   './', './index.html', './styles.css', './app.js',
   './processor.js', './manifest.json', './icon.svg',
-  // Модель Vosk кэшируется автоматически при первом запросе
 ];
 
 self.addEventListener('install', (e) => {
@@ -17,14 +16,14 @@ self.addEventListener('activate', (e) => {
   self.clients.claim();
 });
 
-// ХИТРОСТЬ: Добавляем заголовки COOP/COEP, чтобы Vosk (WebAssembly) мог использовать SharedArrayBuffer
 self.addEventListener('fetch', (e) => {
   if (e.request.mode === 'navigate') {
     e.respondWith(
       fetch(e.request).then((response) => {
         const newHeaders = new Headers(response.headers);
         newHeaders.set('Cross-Origin-Opener-Policy', 'same-origin');
-        newHeaders.set('Cross-Origin-Embedder-Policy', 'require-corp');
+        // credentialless позволяет грузить внешние скрипты (Vosk) без ошибок
+        newHeaders.set('Cross-Origin-Embedder-Policy', 'credentialless'); 
         return new Response(response.body, {
           status: response.status,
           statusText: response.statusText,
