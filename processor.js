@@ -1,4 +1,4 @@
-// ListenBoost v0.4 — AudioWorklet DSP + Vosk 16kHz Streamer
+// ListenBoost v0.4.1 — AudioWorklet DSP + Vosk 16kHz Streamer
 
 class ListenProcessor extends AudioWorkletProcessor {
   constructor() {
@@ -77,10 +77,10 @@ class ListenProcessor extends AudioWorkletProcessor {
     this.nrEnabled = true;
     this.deEssEnabled = true;
 
-    // --- Vosk Downsampler ---
-    this.voskRatio = sr / 16000; // Обычно 3 (для 48кГц) или 2.75 (для 44.1кГц)
+    // Vosk Downsampler
+    this.voskRatio = sr / 16000;
     this.voskStep = 0;
-    this.voskBuf = new Int16Array(4096); // ~250мс аудио для Vosk
+    this.voskBuf = new Int16Array(4096); // ~256мс аудио
     this.voskPos = 0;
 
     this.port.onmessage = (e) => {
@@ -100,23 +100,16 @@ class ListenProcessor extends AudioWorkletProcessor {
     const N = this.N, bitrev = this.bitrev;
     for (let i = 0; i < N; i++) {
       const j = bitrev[i];
-      if (i < j) {
-        let t = re[i]; re[i] = re[j]; re[j] = t;
-        t = im[i]; im[i] = im[j]; im[j] = t;
-      }
+      if (i < j) { let t = re[i]; re[i] = re[j]; re[j] = t; t = im[i]; im[i] = im[j]; im[j] = t; }
     }
     const cos = this.cos, sin = this.sin;
     for (let len = 2; len <= N; len <<= 1) {
       const half = len >> 1, step = N / len;
       for (let i = 0; i < N; i += len) {
         for (let k = 0; k < half; k++) {
-          const tw = k * step;
-          const wRe = cos[tw], wIm = sin[tw];
-          const a = i + k, b = a + half;
-          const tRe = wRe * re[b] - wIm * im[b];
-          const tIm = wRe * im[b] + wIm * re[b];
-          re[b] = re[a] - tRe; im[b] = im[a] - tIm;
-          re[a] += tRe; im[a] += tIm;
+          const tw = k * step, wRe = cos[tw], wIm = sin[tw], a = i + k, b = a + half;
+          const tRe = wRe * re[b] - wIm * im[b], tIm = wRe * im[b] + wIm * re[b];
+          re[b] = re[a] - tRe; im[b] = im[a] - tIm; re[a] += tRe; im[a] += tIm;
         }
       }
     }
@@ -147,32 +140,23 @@ class ListenProcessor extends AudioWorkletProcessor {
       for (let k = 0; k < nBins; k++) {
         const xr = re[k], imVal = im[k];
         const power = xr * xr + imVal * imVal;
-
         this.smoothP[k] = 0.7 * this.smoothP[k] + 0.3 * power;
 
-        if (this.smoothP[k] < this.minP[k]) {
-          this.minP[k] = this.smoothP[k];
-          this.minCount[k] = 0;
-        } else if (++this.minCount[k] > this.minResetPeriod) {
-          this.minP[k] = this.smoothP[k];
-          this.minCount[k] = 0;
-        }
+        if (this.smoothP[k] < this.minP[k]) { this.minP[k] = this.smoothP[k]; this.minCount[k] = 0; }
+        else if (++this.minCount[k] > this.minResetPeriod) { this.minP[k] = this.smoothP[k]; this.minCount[k] = 0; }
 
         const noiseEst = Math.max(this.minP[k] * 1.5, 1e-10);
         this.noiseP[k] = 0.9 * this.noiseP[k] + 0.1 * noiseEst;
         const gamma = power / (this.noiseP[k] + 1e-10);
-        const xiSNR = dd * (this.prevClean[k] / (this.noiseP[k] + 1e-10))
-                 + (1 - dd) * Math.max(gamma - 1, 0);
+        const xiSNR = dd * (this.prevClean[k] / (this.noiseP[k] + 1e-10)) + (1 - dd) * Math.max(gamma - 1, 0);
         let g = xiSNR / (1 + xiSNR);
-        if (g < floor) g = floor;
-        if (g > 1) g = 1;
+        if (g < floor) g = floor; if (g > 1) g = 1;
 
         this.smoothGain[k] = 0.7 * this.smoothGain[k] + 0.3 * g;
         this.prevGain[k] = this.smoothGain[k];
         this.prevClean[k] = power * this.smoothGain[k] * this.smoothGain[k];
 
-        re[k] = xr * this.smoothGain[k];
-        im[k] = imVal * this.smoothGain[k];
+        re[k] = xr * this.smoothGain[k]; im[k] = imVal * this.smoothGain[k];
       }
 
       if (this.deEssEnabled) {
@@ -184,30 +168,23 @@ class ListenProcessor extends AudioWorkletProcessor {
         let red = 0;
         if (ratio > 0.25) red = Math.min(0.55, (ratio - 0.25) * 2.5);
         this.sibEnv = 0.7 * this.sibEnv + 0.3 * red;
-        if (this.sibEnv > 0.02) {
-          for (let k = sibStart; k < nBins; k++) {
-            re[k] *= (1 - this.sibEnv); im[k] *= (1 - this.sibEnv);
-          }
-        }
+        if (this.sibEnv > 0.02) { for (let k = sibStart; k < nBins; k++) { re[k] *= (1 - this.sibEnv); im[k] *= (1 - this.sibEnv); } }
       }
     }
 
     for (let k = 1; k < N / 2; k++) { re[N - k] = re[k]; im[N - k] = -im[k]; }
     im[0] = 0; im[N / 2] = 0;
     this.ifft(re, im);
-
     for (let i = 0; i < N; i++) this.olaTemp[i] = re[i] * win[i];
 
     let sum = 0;
     for (let i = 0; i < N; i++) sum += this.olaTemp[i] * this.olaTemp[i];
     const rms = Math.sqrt(sum / N);
     this.agcEnv = this.aAgcEnv * this.agcEnv + (1 - this.aAgcEnv) * Math.max(rms, 1e-4);
-    let target = 0.12 / this.agcEnv;
-    target = Math.max(0.6, Math.min(this.maxAgc, target));
+    let target = Math.max(0.6, Math.min(this.maxAgc, 0.12 / this.agcEnv));
     this.agcGain = this.aAgcGain * this.agcGain + (1 - this.aAgcGain) * target;
 
-    const lo = Math.max(2, Math.floor(200 * N / sr));
-    const hi = Math.min(nBins, Math.floor(4000 * N / sr));
+    const lo = Math.max(2, Math.floor(200 * N / sr)), hi = Math.min(nBins, Math.floor(4000 * N / sr));
     let sig = 0, noi = 0;
     for (let k = lo; k < hi; k++) { sig += this.smoothP[k]; noi += this.noiseP[k]; }
     const snr = sig / (noi + 1e-10);
@@ -215,8 +192,7 @@ class ListenProcessor extends AudioWorkletProcessor {
 
     if (now !== this.vadPending) { this.vadPending = now; this.vadHold = 0; }
     if (++this.vadHold > 12 && this.vadPending !== this.vadState) {
-      this.vadState = this.vadPending;
-      this.port.postMessage({ type: 'vad', active: this.vadState });
+      this.vadState = this.vadPending; this.port.postMessage({ type: 'vad', active: this.vadState });
     }
   }
 
@@ -252,8 +228,7 @@ class ListenProcessor extends AudioWorkletProcessor {
 
       const ratio = this.fastEnv / Math.max(this.slowEnv, 1e-5);
       let tTarget = 1;
-      if (ratio > 1.6 && this.transient > 0)
-        tTarget = Math.max(0.2, 1 / Math.pow(ratio, this.transient));
+      if (ratio > 1.6 && this.transient > 0) tTarget = Math.max(0.2, 1 / Math.pow(ratio, this.transient));
       this.transGain = this.aTrans * this.transGain + (1 - this.aTrans) * tTarget;
 
       const gTarget = a < gateLin ? Math.max(0.05, a / gateLin) : 1;
@@ -263,17 +238,15 @@ class ListenProcessor extends AudioWorkletProcessor {
       if (y > 0.95) y = 0.95; else if (y < -0.95) y = -0.95;
       out[i] = y;
 
-      // --- Vosk Data Stream (16kHz) ---
+      // --- ОТПРАВКА В VOSK ---
       this.voskStep += 16000 / sampleRate;
       if (this.voskStep >= 1) {
         this.voskStep -= 1;
-        // Ограничиваем амплитуду и переводим в Int16
-        const val = Math.max(-1, Math.min(1, y));
-        this.voskBuf[this.voskPos++] = val * 32767;
+        this.voskBuf[this.voskPos++] = Math.max(-1, Math.min(1, y)) * 32767;
         if (this.voskPos >= this.voskBuf.length) {
-          // Отправляем буфер в главный поток
-          this.port.postMessage({ type: 'vosk_audio', buffer: this.voskBuf }, [this.voskBuf.buffer]);
-          this.voskBuf = new Int16Array(4096);
+          // Отправляем САМ МАССИВ (Int16Array), а не его .buffer
+          this.port.postMessage({ type: 'vosk_audio', buffer: this.voskBuf });
+          this.voskBuf = new Int16Array(4096); // Пересоздаем
           this.voskPos = 0;
         }
       }
@@ -281,5 +254,4 @@ class ListenProcessor extends AudioWorkletProcessor {
     return true;
   }
 }
-
 registerProcessor('listen-processor', ListenProcessor);
