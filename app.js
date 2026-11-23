@@ -1,5 +1,8 @@
 const $ = (id) => document.getElementById(id);
 
+// --- ВАЖНО: Вставьте сюда вашу ссылку на модель из GitHub Releases ---
+const MODEL_URL = 'https://github.com/depsikkolibry/listenboost/releases/download/v1.0/model.tar.gz';
+
 const PRESETS = {
   talk:    { gain: 1.5, maxAgc: 4, transient: 0.6, gate: -50, nr: 0.50, presence: 4, hp: 100 },
   tv:      { gain: 1.2, maxAgc: 3, transient: 0.5, gate: -55, nr: 0.70, presence: 6, hp: 80  },
@@ -14,36 +17,52 @@ let ctx = null, stream = null, src = null, hp = null, presence = null,
 let micId = localStorage.getItem('sluh_mic') || '';
 let running = false;
 
-// --- Vosk Variables ---
+// --- Vosk & Fallback Variables ---
 let voskModel = null;
 let voskRecognizer = null;
-let voskLoaded = false;
+let useVosk = false;
+let asr = null; // Для онлайн-режима (Web Speech API)
 
 if ('serviceWorker' in navigator) {
-  navigator.serviceWorker.register('sw.js').catch(() => {});
+  navigator.serviceWorker.register('sw.js').catch(console.error);
 }
 
-// ---------- Vosk Initialization ----------
-async function initVosk() {
+// ---------- 1. Инициализация ИИ (Vosk или Онлайн) ----------
+async function initAI() {
+  // Проверка SharedArrayBuffer (нужен для Vosk)
+  if (typeof SharedArrayBuffer === 'undefined') {
+    $('status').textContent = 'Настройка офлайн-режима... Автоперезагрузка через 2 сек.';
+    setTimeout(() => location.reload(), 2000);
+    return;
+  }
+
   try {
-    $('status').textContent = 'Загрузка офлайн-модели (Vosk)...';
-    // Загружаем модель из папки models/
-    voskModel = await Vosk.createModel('./models/model.tar.gz');
+    $('status').textContent = 'Скачивание модели ИИ (45 МБ)... Пожалуйста, подождите.';
+    const response = await fetch(MODEL_URL);
+    if (!response.ok) throw new Error('Файл модели не найден (проверьте ссылку)');
+    
+    const contentLength = response.headers.get('content-length') || 45000000;
+    let loaded = 0;
+    const reader = response.body.getReader();
+    const chunks = [];
+    
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      chunks.push(value);
+      loaded += value.length;
+      const percent = Math.round((loaded / contentLength) * 100);
+      $('status').textContent = `Скачивание ИИ: ${percent}% (не закрывайте)`;
+    }
+    
+    $('status').textContent = 'Инициализация нейросети...';
+    const blob = new Blob(chunks);
+    voskModel = await Vosk.createModel(blob);
     voskRecognizer = new voskModel.KaldiRecognizer(16000);
 
     voskRecognizer.on("result", (message) => {
       const text = message.result.text;
-      if (text) {
-        $('subtitleInterim').textContent = '';
-        const el = document.createElement('p');
-        el.textContent = text.charAt(0).toUpperCase() + text.slice(1);
-        $('subtitleFinal').appendChild(el);
-        
-        while ($('subtitleFinal').children.length > 20) {
-          $('subtitleFinal').removeChild($('subtitleFinal').firstChild);
-        }
-        $('subtitles').scrollTop = $('subtitles').scrollHeight;
-      }
+      if (text) addSubtitle(text);
     });
 
     voskRecognizer.on("partialresult", (message) => {
@@ -51,17 +70,60 @@ async function initVosk() {
       if (partial) $('subtitleInterim').textContent = partial;
     });
 
-    voskLoaded = true;
+    useVosk = true;
     $('startBtn').disabled = false;
-    $('startBtn').textContent = '▶ Начать слушать';
-    $('status').textContent = 'ИИ готов. Нажмите «Начать».';
+    $('startBtn').textContent = '▶ Начать слушать (Офлайн)';
+    $('status').textContent = 'Офлайн ИИ готов. Нажмите «Начать».';
   } catch (err) {
-    console.error(err);
-    $('status').textContent = 'Ошибка загрузки ИИ. Проверьте интернет при первом запуске.';
+    console.warn('Vosk failed:', err);
+    $('status').textContent = 'Офлайн-модель не загрузилась. Включаю онлайн-распознавание...';
+    initWebSpeechFallback();
   }
 }
 
-// ---------- Settings & UI ----------
+function initWebSpeechFallback() {
+  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (!SR) {
+    $('status').textContent = 'Ваш браузер не поддерживает распознавание речи.';
+    $('startBtn').disabled = false;
+    return;
+  }
+  asr = new SR();
+  asr.lang = 'ru-RU';
+  asr.continuous = true;
+  asr.interimResults = true;
+  
+  asr.onresult = (e) => {
+    let interim = '', finalBatch = '';
+    for (let i = e.resultIndex; i < e.results.length; i++) {
+      if (e.results[i].isFinal) finalBatch += e.results[i][0].transcript;
+      else interim += e.results[i][0].transcript;
+    }
+    if (interim) $('subtitleInterim').textContent = interim;
+    if (finalBatch) addSubtitle(finalBatch);
+  };
+  
+  asr.onend = () => { if (running) try { asr.start(); } catch {} };
+  
+  useVosk = false;
+  $('startBtn').disabled = false;
+  $('startBtn').textContent = '▶ Начать слушать (Онлайн)';
+  $('status').textContent = 'Готово (Онлайн режим). Нажмите «Начать».';
+}
+
+function addSubtitle(text) {
+  $('subtitleInterim').textContent = '';
+  const el = document.createElement('p');
+  const cleanText = text.trim();
+  el.textContent = cleanText.charAt(0).toUpperCase() + cleanText.slice(1);
+  $('subtitleFinal').appendChild(el);
+  while ($('subtitleFinal').children.length > 20) {
+    $('subtitleFinal').removeChild($('subtitleFinal').firstChild);
+  }
+  $('subtitles').scrollTop = $('subtitles').scrollHeight;
+}
+
+// ---------- 2. Настройки ----------
 const FMT = {
   gain: v => v.toFixed(1) + '×', maxAgc: v => v.toFixed(1) + '×', nr: v => v.toFixed(2),
   transient: v => v.toFixed(2), gate: v => Math.round(v) + ' dB',
@@ -75,8 +137,7 @@ function bindSlider(id) {
   el.oninput = () => {
     params[id] = parseFloat(el.value);
     out.textContent = FMT[id](params[id]);
-    applyLive();
-    save();
+    applyLive(); save();
   };
 }
 ['gain','maxAgc','nr','transient','gate','presence','hp'].forEach(bindSlider);
@@ -108,7 +169,7 @@ document.querySelectorAll('.preset').forEach(btn => {
   };
 });
 
-// ---------- Microphones ----------
+// ---------- 3. Микрофоны ----------
 const BT_RE = /bluetooth|headset|hands.?free|buds|airpods|headphone|наушник|гарнитур|free\s*hands/i;
 const isBTMic = (d) => BT_RE.test(d.label || '');
 
@@ -133,14 +194,13 @@ async function refreshMicList() {
       const o = document.createElement('option');
       o.value = d.deviceId;
       const isBT = isBTMic(d);
-      const label = d.label || `Микрофон ${d.deviceId.slice(0, 6)}`;
-      o.textContent = isBT ? `🎧 ${label} (не рекомендуется)` : `🎤 ${label}`;
+      o.textContent = isBT ? `🎧 ${d.label || 'Гарнитура'} (не рекомендуется)` : `🎤 ${d.label || 'Микрофон'}`;
       if (d.deviceId === bestId) o.selected = true;
       sel.appendChild(o);
     });
     micId = bestId;
     updateMicWarning();
-  } catch {}
+  } catch (err) { console.warn(err); }
 }
 
 function updateMicWarning() {
@@ -155,26 +215,22 @@ $('micSelect').onchange = async (e) => {
 };
 navigator.mediaDevices?.addEventListener?.('devicechange', refreshMicList);
 
-// ---------- Start / Stop ----------
+// ---------- 4. Запуск / Стоп ----------
 $('startBtn').onclick = start;
 $('stopBtn').onclick = stop;
 
 async function start() {
-  if (!voskLoaded) return;
   try {
     $('status').textContent = 'Запуск...';
     await ensurePermission();
     if (!micId) await refreshMicList();
 
-    const audioConstraints = {
-      channelCount: 1, echoCancellation: true, noiseSuppression: false, autoGainControl: false,
-    };
+    const audioConstraints = { channelCount: 1, echoCancellation: true, noiseSuppression: false, autoGainControl: false };
     if (micId) audioConstraints.deviceId = { ideal: micId };
 
     stream = await navigator.mediaDevices.getUserMedia({ audio: audioConstraints });
     const s = stream.getAudioTracks()[0].getSettings();
     
-    // Инициализируем AudioContext на частоте устройства
     ctx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: s.sampleRate || 48000 });
     if (ctx.state === 'suspended') await ctx.resume();
     await ctx.audioWorklet.addModule('processor.js');
@@ -183,16 +239,14 @@ async function start() {
     hp = ctx.createBiquadFilter(); hp.type = 'highpass'; hp.frequency.value = params.hp; hp.Q.value = 0.7;
     presence = ctx.createBiquadFilter(); presence.type = 'peaking'; presence.frequency.value = 2800; presence.Q.value = 1.0; presence.gain.value = params.presence;
 
-    worklet = new AudioWorkletNode(ctx, 'listen-processor', {
-      numberOfInputs: 1, numberOfOutputs: 1, outputChannelCount: [1],
-    });
+    worklet = new AudioWorkletNode(ctx, 'listen-processor', { numberOfInputs: 1, numberOfOutputs: 1, outputChannelCount: [1] });
     
-    // Получаем аудио-буферы для Vosk
     worklet.port.onmessage = (e) => {
       if (e.data.type === 'vad') {
         $('vadDot').classList.toggle('active', e.data.active);
         $('vadText').textContent = e.data.active ? 'Слышу речь' : 'Тишина';
-      } else if (e.data.type === 'vosk_audio' && voskRecognizer) {
+      } else if (e.data.type === 'vosk_audio' && useVosk && voskRecognizer) {
+        // Передаем Int16Array в Vosk
         voskRecognizer.acceptWaveform(e.data.buffer);
       }
     };
@@ -209,13 +263,17 @@ async function start() {
 
     running = true;
     $('startBtn').disabled = true; $('stopBtn').disabled = false;
-    $('status').textContent = `Микрофон: ${$('micSelect').selectedOptions[0]?.textContent || '—'} · Vosk ON`;
+    
+    if (!useVosk && asr) try { asr.start(); } catch (err) {}
+    
+    $('status').textContent = `Работает: ${$('micSelect').selectedOptions[0]?.textContent.split(' ')[1] || 'Микрофон'} · ${useVosk ? 'Vosk ИИ' : 'Онлайн'}`;
   } catch (e) {
     console.error(e); $('status').textContent = 'Ошибка: ' + e.message;
   }
 }
 
 async function stop() {
+  if (asr) try { asr.stop(); } catch (e) {}
   try {
     worklet?.disconnect(); presence?.disconnect(); hp?.disconnect();
     src?.disconnect(); analyser?.disconnect();
@@ -230,7 +288,7 @@ async function stop() {
   $('vadDot').classList.remove('active'); $('vadText').textContent = 'Ожидание'; $('meterFill').style.width = '0%';
 }
 
-// ---------- Visuals ----------
+// ---------- 5. Визуализация ----------
 function drawMeter() {
   if (!analyser) return;
   const buf = new Uint8Array(analyser.fftSize);
@@ -285,6 +343,5 @@ function drawSpectrum() {
   loop();
 }
 
-// ---------- Init ----------
 refreshMicList();
-initVosk(); // Запускаем загрузку нейросети при старте
+initAI();
